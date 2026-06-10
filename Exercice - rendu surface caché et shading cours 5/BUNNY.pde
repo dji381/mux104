@@ -11,7 +11,7 @@ ArrayList<PVector> sommets = new ArrayList<PVector>();
 // Liste des faces. Chaque face est un tableau d'entiers
 // contenant les INDICES des sommets qui la composent.
 ArrayList<Face> faces = new ArrayList<Face>();
-
+float[][] zbuffer;
 //camera
 float theta = radians(45);
 float phi = radians(45); 
@@ -24,12 +24,18 @@ float minx = -2;
 float maxx = 2;
 float miny = -2;
 float maxy = 2;
-
+//Lumiere
+Light lumiere;
 void setup() {
   size(700, 700);
+  lumiere = new Light();
   // On charge le fichier. dans le dossier
   // "data" de sketch Processing.
   chargerOBJ("bunny.obj");
+  zbuffer = new float[width][height];
+  for (int i = 0; i < width; i++)
+    for (int j = 0; j < height; j++)
+      zbuffer[i][j] = Float.MAX_VALUE; // "infiniment loin" au départ[i][j] = Float.MAX_VALUE;
   // calcul barycentre de l'objet
   float sx = 0;
   float sy = 0;
@@ -46,13 +52,18 @@ void setup() {
    sommets.get(s).y -= sy;
    sommets.get(s).z -= sz;
   }
-  background(0);stroke(250);fill(200);
+  background(0);
   
 }
 void draw(){
+    // réinitialiser le z-buffer à chaque frame
+  for (int i = 0; i < width; i++)
+    for (int j = 0; j < height; j++)
+      zbuffer[i][j] = Float.MAX_VALUE;
+      
  theta = radians(mouseX);
  phi = radians(mouseY);
- background(0);stroke(250);fill(200);
+ background(0);
  calcOprim();
  drawOBJ();
 }
@@ -65,8 +76,6 @@ void drawOBJ() {
   // On se place au centre de la fenêtre et on agrandit,
   // car la projection perspective donne de petites valeurs.
   pushMatrix();
-  strokeWeight(1.0 / 300);        // garde un trait fin malgré le scale
-
   for (Face face : faces) {
     PVector a = sommets.get(face.a);
     PVector b = sommets.get(face.b);
@@ -107,34 +116,122 @@ void drawOBJ() {
     
     px_c = map(px_c,minx,maxx, 0, width);
     py_c = map(py_c, miny, maxy,height,0);
-    line(px_a, py_a, px_b, py_b);
-    line(px_b, py_b, px_c, py_c);
-    line(px_c, py_c, px_a, py_a);   // ← corrigé (referme le triangle)
+    
+    
+    PVector col = PVector.mult(face.col,face.lambert);
+    fill(col.x,col.y,col.z);
+    stroke(col.x,col.y,col.z);
+    triangle(px_a, py_a, px_b, py_b,px_c, py_c);
+    
+    //fillTriangle(new PVector(px_a,py_a,za),new PVector(px_b,py_b,zb),new PVector(px_c,py_c,zc));
+    //line(px_a, py_a, px_b, py_b);
+    //line(px_b, py_b, px_c, py_c);
+    //line(px_c, py_c, px_a, py_a); 
     }
 
   }
   popMatrix();
 }
 
+void fillTriangle(PVector s1, PVector s2, PVector s3) {
+  // aire signée à l'écran → ignorer les lamelles
+  float aire = (s2.x-s1.x)*(s3.y-s1.y) - (s3.x-s1.x)*(s2.y-s1.y);
+  if (abs(aire) < 1) return;
+    // trier par Y croissant (s1 = haut, s3 = bas)
+  PVector[] v = {s1, s2, s3};
+  for (int i = 0; i < 2; i++)
+    for (int j = i + 1; j < 3; j++)
+      if (v[j].y < v[i].y) { PVector tmp = v[i]; v[i] = v[j]; v[j] = tmp; }
+  s1 = v[0]; s2 = v[1]; s3 = v[2];
+  
+  // PARTIE HAUTE : de s1.y à s2.y
+  for (int y = (int)s1.y; y < (int)s2.y; y++) {
+    PVector pLong  = interpEdge(s1, s3, y); // arête longue s1->s3
+    PVector pShort = interpEdge(s1, s2, y); // arête courte s1->s2
+    scanLine(y, pLong, pShort);
+  }
+  
+  // PARTIE BASSE : de s2.y à s3.y
+  for (int y = (int)s2.y; y <= (int)s3.y; y++) {
+    PVector pLong  = interpEdge(s1, s3, y); // arête longue s1->s3
+    PVector pShort = interpEdge(s2, s3, y); // arête courte s2->s3 (changement)
+    scanLine(y, pLong, pShort);
+  }
+}
+
+// Interpole le long d'une arête A->B à la hauteur y
+// Renvoie un PVector où x = position X, z = profondeur
+PVector interpEdge(PVector A, PVector B, float y) {
+  if (B.y == A.y) return new PVector(A.x, y, A.z); // arête horizontale
+  
+  float t = (y - A.y) / (B.y - A.y);   // proportion verticale (0 à 1)
+  float x = A.x + t * (B.x - A.x);     // X interpolé
+  float z = A.z + t * (B.z - A.z);     // Z interpolé en même temps
+  
+  return new PVector(x, y, z);
+}
+
+// Colorie une ligne horizontale, en interpolant Z entre les deux bords
+void scanLine(int y, PVector p1, PVector p2) {
+  if (y < 0 || y >= height) return;   // garde verticale
+  
+  // déterminer gauche (a) et droite (b) selon X
+  PVector left  = (p1.x < p2.x) ? p1 : p2;
+  PVector right = (p1.x < p2.x) ? p2 : p1;
+  
+  float xa = left.x,  za = left.z;
+  float xb = right.x, zb = right.z;
+  
+  for (int x = (int)xa; x <= (int)xb; x++) {
+    if (x < 0 || x >= width) continue;  // garde horizontale
+    
+    float t = (xb == xa) ? 0 : (x - xa) / (xb - xa);
+    float zp = za + t * (zb - za);   // Z interpolé pour ce pixel
+    
+    // --- Z-Buffer ---
+    if (zp < zbuffer[x][y]) {   // ce pixel est plus proche ?
+      zbuffer[x][y] = zp;       // on mémorise sa profondeur
+      point(x, y);              // on le colorie
+    }
+  }
+}
 class Face {
   int a, b, c;
   float theta;
   PVector normal;
+  PVector col = new PVector(205,100,0);
+  float intensite;
+  float lambert;
+  float Ks = 2; // Intensité speculaire
+  float Kd = 1.0; // Coef de reflexion diffuse
+  float n = 20;
   Face(int a, int b, int c){
     this.a = a;
     this.b = b;
     this.c = c;
-    this.calcNormal();
   }
   void calcNormal(){
     PVector p1 = sommets.get(a);
     PVector p2 = sommets.get(b);
     PVector p3 = sommets.get(c);
-    PVector P = PVector.sub(p1,p2);
+    PVector P = PVector.sub(p2,p1);
     PVector Q = PVector.sub(p3,p1);
     normal = P.cross(Q);
     normal.normalize();
     this.theta = PVector.dot(normal,PVector.sub(Oprim,p1));
+    
+    //---loi de lambert ---
+    PVector S = lumiere.lumiere.copy();
+    float cosAngle = PVector.dot(normal,S);
+    cosAngle = max(0, cosAngle);
+    this.intensite = Kd * cosAngle;
+    
+    //---Phong----
+    // spéculaire : rayon réfléchi S' = 2(N·S)N - S
+    PVector Sp = PVector.sub(PVector.mult(normal, 2 * PVector.dot(normal,S)), S);
+    PVector viewDir = PVector.sub(Oprim,p1);
+    float spec = Ks * pow(max(0,PVector.dot(Sp, viewDir)),n);
+    this.lambert= intensite + spec;
   }
   
 }
@@ -194,4 +291,14 @@ void chargerOBJ(String nomFichier) {
       faces.add(new Face(face[0],face[1],face[2]));
     }
   }
+}
+class Light{
+  PVector lumiere = new PVector(0, 0, 1); // direction de la lumière
+  float Ip = 255;  // intensité de la source
+  
+  Light(PVector dirLight, float Ip){
+    this.lumiere = dirLight;
+    this.Ip = Ip;
+  }
+  Light(){}
 }
